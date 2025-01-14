@@ -1,0 +1,2 @@
+# ConversationMachineLearning2
+会話の活性度を会話特徴量を使って機械学習させる
