@@ -1,0 +1,107 @@
+# 会話活性度予測システム設定ファイル
+
+# データ設定
+data:
+  # カラム設定
+  columns:
+    conversation_id: "cid"  # 会話IDカラム名（オプション）
+    target: "class"         # 目的変数カラム名
+    exclude: []             # 除外するカラム名リスト
+  
+  # クラス設定
+  classes:
+    # 数値クラスの場合
+    numeric:
+      mapping: {1: "LL", 2: "LM", 3: "MM", 4: "MH", 5: "HH"}
+    
+    # 文字列クラスの場合
+    string:
+      mapping: {"LL": 1, "LM": 2, "MM": 3, "MH": 4, "HH": 5}
+  
+  # データ検証
+  validation:
+    min_samples: 10         # 最小サンプル数
+    min_features: 3         # 最小特徴量数
+    max_missing_ratio: 0.5  # 最大欠損値比率
+
+# 前処理設定
+preprocessing:
+  # 欠損値処理
+  missing_values:
+    strategy: "mean"        # mean, median, mode, drop
+    numeric_strategy: "mean"
+    categorical_strategy: "mode"
+  
+  # 標準化
+  scaling:
+    enabled: true
+    method: "standard"      # standard, minmax, robust
+    by_conversation: true
+  
+  # 離散化
+  discretization:
+    enabled: true
+    n_bins: 20
+    method: "uniform"       # uniform, quantile, kmeans
+  
+  # 特徴量選択
+  feature_selection:
+    enabled: true
+    method: "percentile"    # percentile, k_best, mutual_info
+    percentile: 50
+    k_best: 10
+  
+  # 時系列特徴量
+  temporal_features:
+    enabled: false
+    window_size: 3
+
+# データ分割設定
+split:
+  test_size: 0.2
+  random_state: 42
+  by_conversation: true     # 会話単位で分割
+  stratify: true           # 層別サンプリング
+
+# モデル設定
+models:
+  # アンサンブル
+  ensemble:
+    enabled: true
+    voting: "soft"          # soft, hard
+    classifiers: ["rf", "svm", "nb"]
+  
+  # XGBoost
+  xgboost:
+    enabled: true
+    use_label_encoding: true  # ラベルエンコーディング使用
+  
+  # ディープラーニング
+  deep_learning:
+    enabled: true
+    architecture: [128, 64, 32]
+    dropout_rate: 0.3
+    learning_rate: 0.001
+    epochs: 50
+    patience: 10
+
+# ハイパーパラメータ最適化
+optimization:
+  enabled: true
+  method: "random"          # random, grid, bayesian
+  n_trials: 50
+  cv_folds: 5
+
+# 評価設定
+evaluation:
+  metrics: ["accuracy", "precision", "recall", "f1"]
+  cross_validation: true
+  cv_folds: 5
+
+# 出力設定
+output:
+  models_dir: "./models"
+  plots_dir: "./models"
+  save_format: "pdf"        # pdf, png
+  save_plots: true
+  save_models: true 

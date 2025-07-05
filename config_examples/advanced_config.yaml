@@ -1,0 +1,86 @@
+# 高度な設定例
+# 会話単位での処理と全モデルを使用
+
+data:
+  columns:
+    conversation_id: "cid"
+    target: "class"
+    exclude: []
+  
+  classes:
+    numeric:
+      mapping: {1: "LL", 2: "LM", 3: "MM", 4: "MH", 5: "HH"}
+    string:
+      mapping: {"LL": 1, "LM": 2, "MM": 3, "MH": 4, "HH": 5}
+  
+  validation:
+    min_samples: 20
+    min_features: 5
+    max_missing_ratio: 0.3
+
+preprocessing:
+  missing_values:
+    strategy: "mean"
+    numeric_strategy: "median"
+    categorical_strategy: "mode"
+  
+  scaling:
+    enabled: true
+    method: "robust"
+    by_conversation: true
+  
+  discretization:
+    enabled: true
+    n_bins: 20
+    method: "quantile"
+  
+  feature_selection:
+    enabled: true
+    method: "mutual_info"
+    k_best: 10
+  
+  temporal_features:
+    enabled: true
+    window_size: 3
+
+split:
+  test_size: 0.3
+  random_state: 42
+  by_conversation: true
+  stratify: false
+
+models:
+  ensemble:
+    enabled: true
+    voting: "soft"
+    classifiers: ["rf", "svm", "nb", "knn"]
+  
+  xgboost:
+    enabled: true
+    use_label_encoding: true
+  
+  deep_learning:
+    enabled: true
+    architecture: [256, 128, 64, 32]
+    dropout_rate: 0.4
+    learning_rate: 0.001
+    epochs: 100
+    patience: 15
+
+optimization:
+  enabled: true
+  method: "bayesian"
+  n_trials: 100
+  cv_folds: 5
+
+evaluation:
+  metrics: ["accuracy", "precision", "recall", "f1", "roc_auc"]
+  cross_validation: true
+  cv_folds: 10
+
+output:
+  models_dir: "./models"
+  plots_dir: "./models"
+  save_format: "pdf"
+  save_plots: true
+  save_models: true 
