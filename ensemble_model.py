@@ -304,23 +304,26 @@ class EnsembleModel:
         
         # 最適化パラメータで更新
         if rf_params:
+            print(f"Random Forestパラメータ: {rf_params}")
             default_rf_params.update(rf_params)
         if svm_params:
+            print(f"SVMパラメータ: {svm_params}")
             default_svm_params.update(svm_params)
         
         # モデル作成
         model1 = GaussianNB()
         model2 = KNeighborsClassifier(n_neighbors=5)
         model3 = RandomForestClassifier(**default_rf_params)
-        model4 = GradientBoostingClassifier(random_state=42)
+        # model4 = GradientBoostingClassifier(random_state=42)
+        model4 = GradientBoostingClassifier()
         model5 = SVC(**default_svm_params)
         
         models = [
-            ('gnb', model1), 
-            ('knc', model2), 
-            ('rfc', model3), 
-            ('gbc', model4), 
-            ('svc', model5)
+            ('naive_bayes', model1), 
+            ('knn', model2), 
+            ('random_forest', model3), 
+            ('gradient_boosting', model4), 
+            ('svm', model5)
         ]
         
         self.ensemble_model = VotingClassifier(estimators=models, voting='soft')

@@ -9,9 +9,13 @@ import sys
 import numpy as np
 import pandas as pd
 import sklearn.preprocessing as pre
-from sklearn.feature_selection import SelectPercentile, SelectKBest, f_classif
+from sklearn.feature_selection import SelectPercentile, SelectKBest, f_classif, mutual_info_classif, RFE, SelectFromModel
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 
 
 def get_class_number(class_name):
@@ -148,25 +152,233 @@ class DataProcessor:
 
     def select_features(self, method='percentile', **kwargs):
         """
-        特徴量選択
-        :param method: 選択方法 ('percentile', 'k_best', 'pca')
+        特徴量選択（拡張版）
+        :param method: 選択方法 
+            - 'percentile': フィルター法（F検定）
+            - 'k_best': フィルター法（上位k個）
+            - 'mutual_info': フィルター法（相互情報量）
+            - 'rfe': ラッパー法（再帰的特徴量削減）
+            - 'lasso': 埋め込み法（Lasso回帰）
+            - 'tree_importance': 埋め込み法（木ベース重要度）
+            - 'boruta': ボルタアルゴリズム（シャドウ特徴量による検定）
+            - 'stepwise_forward': ステップワイズ法（前方選択）
+            - 'stepwise_backward': ステップワイズ法（後方選択）
         :param kwargs: 追加パラメータ
         """
         if method == 'percentile':
+            # フィルター法：F検定
             percentile = kwargs.get('percentile', 40)
-            self.feature_selector = SelectPercentile(percentile=percentile)
+            self.feature_selector = SelectPercentile(score_func=f_classif, percentile=percentile)
+            print(f"フィルター法（F検定）: 上位{percentile}%の特徴量を選択")
+            
         elif method == 'k_best':
+            # フィルター法：上位k個
             k = kwargs.get('k', 10)
-            self.feature_selector = SelectKBest(k=k)
+            self.feature_selector = SelectKBest(score_func=f_classif, k=k)
+            print(f"フィルター法（上位k個）: 上位{k}個の特徴量を選択")
+            
+        elif method == 'mutual_info':
+            # フィルター法：相互情報量
+            k = kwargs.get('k', 10)
+            self.feature_selector = SelectKBest(score_func=mutual_info_classif, k=k)
+            print(f"フィルター法（相互情報量）: 上位{k}個の特徴量を選択")
+            
+        elif method == 'rfe':
+            # ラッパー法：再帰的特徴量削減
+            n_features = kwargs.get('n_features', 10)
+            estimator = kwargs.get('estimator', RandomForestClassifier(n_estimators=50, random_state=42))
+            self.feature_selector = RFE(estimator=estimator, n_features_to_select=n_features)
+            print(f"ラッパー法（RFE）: {n_features}個の特徴量を選択")
+            
+        elif method == 'lasso':
+            # 埋め込み法：Lasso回帰
+            C = kwargs.get('C', 1.0)
+            estimator = LogisticRegression(penalty='l1', C=C, solver='liblinear', random_state=42)
+            self.feature_selector = SelectFromModel(estimator, prefit=False)
+            print(f"埋め込み法（Lasso）: C={C}で特徴量を選択")
+            
+        elif method == 'tree_importance':
+            # 埋め込み法：木ベース重要度
+            threshold = kwargs.get('threshold', 'mean')
+            estimator = RandomForestClassifier(n_estimators=100, random_state=42)
+            self.feature_selector = SelectFromModel(estimator, threshold=threshold, prefit=False)
+            print(f"埋め込み法（木ベース重要度）: 閾値={threshold}で特徴量を選択")
+            
+        elif method == 'boruta':
+            # ボルタアルゴリズム
+            try:
+                from boruta import BorutaPy
+                n_estimators = kwargs.get('n_estimators', 'auto')
+                max_iter = kwargs.get('max_iter', 100)
+                
+                # Random ForestをベースとしたBoruta
+                rf = RandomForestClassifier(
+                    n_estimators=50,  # 100から50に削減
+                    n_jobs=-1, 
+                    class_weight='balanced', 
+                    max_depth=3,  # 5から3に削減
+                    random_state=42
+                )
+                
+                # Borutaを実行
+                boruta_selector = BorutaPy(
+                    rf, 
+                    n_estimators=n_estimators, 
+                    verbose=0, 
+                    random_state=42,
+                    max_iter=max_iter
+                )
+                
+                # データをnumpy配列に変換して実行
+                X_array = self.x_processed.values
+                y_array = self.y_processed.values
+                
+                boruta_selector.fit(X_array, y_array)
+                
+                # 選択された特徴量を取得
+                selected_features = boruta_selector.support_
+                
+                # カスタムセレクターを作成
+                class BorutaSelector:
+                    def __init__(self, support):
+                        self.support_ = support
+                        self.scores_ = np.ones(len(support))  # ダミースコア
+                    
+                    def fit_transform(self, X, y=None):
+                        return X[:, self.support_]
+                    
+                    def transform(self, X):
+                        return X[:, self.support_]
+                    
+                    def get_support(self):
+                        return self.support_
+                
+                self.feature_selector = BorutaSelector(selected_features)
+                print(f"ボルタアルゴリズム: シャドウ特徴量による統計的検定")
+                print(f"選択された特徴量数: {np.sum(selected_features)}")
+                
+            except ImportError:
+                print("警告: borutaライブラリがインストールされていません")
+                print("インストール方法: pip install boruta")
+                print("代替として木ベース重要度を使用します")
+                threshold = kwargs.get('threshold', 'mean')
+                estimator = RandomForestClassifier(n_estimators=100, random_state=42)
+                self.feature_selector = SelectFromModel(estimator, threshold=threshold, prefit=False)
+                print(f"代替: 埋め込み法（木ベース重要度）: 閾値={threshold}で特徴量を選択")
+            except Exception as e:
+                print(f"Boruta実行エラー: {e}")
+                print("代替として木ベース重要度を使用します")
+                threshold = kwargs.get('threshold', 'mean')
+                estimator = RandomForestClassifier(n_estimators=100, random_state=42)
+                self.feature_selector = SelectFromModel(estimator, threshold=threshold, prefit=False)
+                print(f"代替: 埋め込み法（木ベース重要度）: 閾値={threshold}で特徴量を選択")
+            
+        elif method == 'stepwise_forward':
+            # ステップワイズ法：前方選択
+            try:
+                from mlxtend.feature_selection import SequentialFeatureSelector as SFS
+                k_features = kwargs.get('k_features', 'best')
+                cv = kwargs.get('cv', 5)
+                
+                estimator = RandomForestClassifier(n_estimators=50, random_state=42)
+                self.feature_selector = SFS(
+                    estimator=estimator,
+                    k_features=k_features,
+                    forward=True,
+                    floating=False,
+                    scoring='accuracy',
+                    cv=cv,
+                    n_jobs=-1
+                )
+                print(f"ステップワイズ法（前方選択）: k_features={k_features}, cv={cv}")
+            except ImportError:
+                print("警告: mlxtendライブラリがインストールされていません")
+                print("インストール方法: pip install mlxtend")
+                print("代替としてRFEを使用します")
+                n_features = kwargs.get('n_features', 10)
+                estimator = RandomForestClassifier(n_estimators=50, random_state=42)
+                self.feature_selector = RFE(estimator=estimator, n_features_to_select=n_features)
+                print(f"代替: ラッパー法（RFE）: {n_features}個の特徴量を選択")
+                
+        elif method == 'stepwise_backward':
+            # ステップワイズ法：後方選択
+            try:
+                from mlxtend.feature_selection import SequentialFeatureSelector as SFS
+                k_features = kwargs.get('k_features', 'best')
+                cv = kwargs.get('cv', 5)
+                
+                estimator = RandomForestClassifier(n_estimators=50, random_state=42)
+                self.feature_selector = SFS(
+                    estimator=estimator,
+                    k_features=k_features,
+                    forward=False,
+                    floating=False,
+                    scoring='accuracy',
+                    cv=cv,
+                    n_jobs=-1
+                )
+                print(f"ステップワイズ法（後方選択）: k_features={k_features}, cv={cv}")
+            except ImportError:
+                print("警告: mlxtendライブラリがインストールされていません")
+                print("インストール方法: pip install mlxtend")
+                print("代替としてRFEを使用します")
+                n_features = kwargs.get('n_features', 10)
+                estimator = RandomForestClassifier(n_estimators=50, random_state=42)
+                self.feature_selector = RFE(estimator=estimator, n_features_to_select=n_features)
+                print(f"代替: ラッパー法（RFE）: {n_features}個の特徴量を選択")
+            
         else:
             print("無効な特徴量選択方法です")
+            print("利用可能な方法: 'percentile', 'k_best', 'mutual_info', 'rfe', 'lasso', 'tree_importance', 'boruta', 'stepwise_forward', 'stepwise_backward'")
             return
         
+        # 特徴量選択の実行
         self.x_processed = pd.DataFrame(
             self.feature_selector.fit_transform(self.x_processed, self.y_processed),
             index=self.x_processed.index
         )
-        print(f"特徴量選択完了: {self.x_processed.shape[1]} 特徴量")
+        
+        # 選択された特徴量の情報を表示
+        if hasattr(self.feature_selector, 'get_support'):
+            selected_features = self.feature_selector.get_support()
+            print(f"特徴量選択完了: {self.x_processed.shape[1]} 特徴量（元の特徴量数: {len(selected_features)}）")
+            
+            # 選択された特徴量の詳細情報
+            if hasattr(self.feature_selector, 'scores_'):
+                feature_scores = pd.DataFrame({
+                    'feature': self.x_columns,
+                    'score': self.feature_selector.scores_,
+                    'selected': selected_features
+                }).sort_values('score', ascending=False)
+                
+                print("\n特徴量重要度（上位10個）:")
+                print(feature_scores.head(10)[['feature', 'score', 'selected']])
+
+    def scale_features_for_selection(self, scaler_type='standard'):
+        """
+        特徴量選択前のデータスケーリング
+        :param scaler_type: スケーリング方法 ('standard', 'minmax', 'robust')
+        """
+        if scaler_type == 'standard':
+            self.scaler = StandardScaler()
+            print("StandardScalerでスケーリング")
+        elif scaler_type == 'minmax':
+            self.scaler = MinMaxScaler()
+            print("MinMaxScalerでスケーリング")
+        elif scaler_type == 'robust':
+            self.scaler = RobustScaler()
+            print("RobustScalerでスケーリング")
+        else:
+            print("無効なスケーラーです。StandardScalerを使用します")
+            self.scaler = StandardScaler()
+        
+        # スケーリングを実行
+        self.x_processed = pd.DataFrame(
+            self.scaler.fit_transform(self.x_processed),
+            columns=self.x_processed.columns,
+            index=self.x_processed.index
+        )
+        print("特徴量スケーリング完了")
 
     def split_data(self, test_size=0.2, random_state=42):
         """
@@ -352,6 +564,139 @@ class DataProcessor:
         """
         pass
 
+    def compare_feature_selection_methods(self, methods=['percentile', 'mutual_info', 'tree_importance'], **kwargs):
+        """
+        複数の特徴量選択方法を比較
+        :param methods: 比較する方法のリスト
+        :param kwargs: 各方法のパラメータ
+        """
+        results = {}
+        original_features = self.x_processed.shape[1]
+        
+        print(f"\n特徴量選択方法の比較（元の特徴量数: {original_features}）")
+        print("=" * 60)
+        
+        for method in methods:
+            print(f"\n{method} を実行中...")
+            
+            # 元のデータをバックアップ
+            x_backup = self.x_processed.copy()
+            y_backup = self.y_processed.copy()
+            
+            try:
+                # 特徴量選択を実行
+                if method == 'percentile':
+                    self.select_features(method='percentile', percentile=kwargs.get('percentile', 50))
+                elif method == 'k_best':
+                    self.select_features(method='k_best', k=kwargs.get('k', 10))
+                elif method == 'mutual_info':
+                    self.select_features(method='mutual_info', k=kwargs.get('k', 10))
+                elif method == 'tree_importance':
+                    self.select_features(method='tree_importance', threshold=kwargs.get('threshold', 'mean'))
+                elif method == 'rfe':
+                    self.select_features(method='rfe', n_features=kwargs.get('n_features', 10))
+                elif method == 'lasso':
+                    self.select_features(method='lasso', C=kwargs.get('C', 1.0))
+                elif method == 'boruta':
+                    self.select_features(method='boruta', n_estimators=kwargs.get('n_estimators', 'auto'))
+                elif method == 'stepwise_forward':
+                    self.select_features(method='stepwise_forward', k_features=kwargs.get('k_features', 'best'))
+                elif method == 'stepwise_backward':
+                    self.select_features(method='stepwise_backward', k_features=kwargs.get('k_features', 'best'))
+                
+                # 選択された特徴量数
+                selected_count = self.x_processed.shape[1]
+                
+                # 簡単なモデルでクロスバリデーション評価
+                model = RandomForestClassifier(n_estimators=50, random_state=42)
+                cv_scores = cross_val_score(model, self.x_processed, self.y_processed, cv=3, scoring='accuracy')
+                
+                results[method] = {
+                    'selected_features': selected_count,
+                    'reduction_ratio': (original_features - selected_count) / original_features,
+                    'cv_mean': cv_scores.mean(),
+                    'cv_std': cv_scores.std()
+                }
+                
+                print(f"  選択された特徴量数: {selected_count}")
+                print(f"  削減率: {results[method]['reduction_ratio']:.2%}")
+                print(f"  クロスバリデーション精度: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+                
+            except Exception as e:
+                print(f"  エラー: {e}")
+                results[method] = None
+            
+            # データを復元
+            self.x_processed = x_backup
+            self.y_processed = y_backup
+        
+        # 結果の比較
+        print(f"\n特徴量選択方法の比較結果:")
+        print("=" * 60)
+        print(f"{'方法':<15} {'特徴量数':<10} {'削減率':<10} {'精度':<15}")
+        print("-" * 60)
+        
+        for method, result in results.items():
+            if result is not None:
+                print(f"{method:<15} {result['selected_features']:<10} "
+                      f"{result['reduction_ratio']:<10.1%} "
+                      f"{result['cv_mean']:.3f}±{result['cv_std']:.3f}")
+        
+        # 最良の方法を選択
+        best_method = None
+        best_score = -1
+        
+        for method, result in results.items():
+            if result is not None and result['cv_mean'] > best_score:
+                best_score = result['cv_mean']
+                best_method = method
+        
+        if best_method:
+            print(f"\n最良の方法: {best_method} (精度: {best_score:.3f})")
+            return best_method, results
+        else:
+            print("\n有効な方法が見つかりませんでした")
+            return None, results
+
+    def calculate_permutation_importance(self, model, X, y, n_repeats=10, random_state=42):
+        """
+        Permutation Importanceを計算
+        :param model: 学習済みモデル
+        :param X: 特徴量
+        :param y: 目的変数
+        :param n_repeats: 繰り返し回数
+        :param random_state: 乱数シード
+        :return: 重要度のDataFrame
+        """
+        try:
+            from sklearn.inspection import permutation_importance
+            
+            # Permutation Importanceを計算
+            result = permutation_importance(
+                model, X, y, 
+                n_repeats=n_repeats, 
+                random_state=random_state,
+                n_jobs=-1
+            )
+            
+            # 結果をDataFrameに変換
+            importance_df = pd.DataFrame({
+                'feature': X.columns,
+                'importance_mean': result.importances_mean,
+                'importance_std': result.importances_std,
+                'importance_rank': np.argsort(-result.importances_mean) + 1
+            }).sort_values('importance_mean', ascending=False)
+            
+            print(f"Permutation Importance計算完了（繰り返し回数: {n_repeats}）")
+            print("\n重要度（上位10個）:")
+            print(importance_df.head(10)[['feature', 'importance_mean', 'importance_std', 'importance_rank']])
+            
+            return importance_df
+            
+        except ImportError:
+            print("警告: sklearn.inspection.permutation_importanceが利用できません")
+            print("sklearn 0.22以降が必要です")
+            return None
 
 
 def main():
