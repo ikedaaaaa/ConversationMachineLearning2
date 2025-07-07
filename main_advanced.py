@@ -11,7 +11,6 @@ import datetime
 import numpy as np
 import pandas as pd
 import argparse
-from sklearn.model_selection import cross_val_score
 import matplotlib
 matplotlib.use('Agg')  # バックエンドをAggに設定（Docker環境用）
 import matplotlib.pyplot as plt
@@ -122,6 +121,14 @@ def main():
     
     args = parser.parse_args()
     
+    # テストモードの処理
+    if args.test:
+        print("テストモード: 保存されたモデルを使用して予測テストを実行します")
+        # ここにテストモードの処理を追加
+        # 現在は実装されていないため、メッセージを表示して終了
+        print("テストモードは現在実装されていません")
+        return
+    
     print("=" * 60)
     print("会話活性度予測システム - 高度版")
     print("=" * 60)
@@ -138,37 +145,74 @@ def main():
         
         print(f"\n指定されたデータファイル: {args.data}")
         data_file = args.data
-        use_sample_data = False
     else:
         # 1. サンプルデータ作成
         print("\n1. サンプルデータ作成")
         print("-" * 30)
         df = create_sample_data_with_conversations()
         data_file = 'data/sample_data_with_conversations.csv'
-        use_sample_data = True
     
     # 2. データ処理
     print("\n2. データ処理")
     print("-" * 30)
-    processor = DataProcessor(data_file)
+    data_processor = DataProcessor(data_file)
     
     # 時系列特徴量を追加（現在は無効化）
-    processor.add_temporal_features()
+    data_processor.add_temporal_features()
     
     # 会話ごとの前処理
-    processor.process_by_conversation()
+    data_processor.process_by_conversation()
     
     # 目的変数を設定
-    processor.get_target_classes()
+    data_processor.get_target_classes()
     
     # 会話単位での標準化
-    processor.standardize_by_conversation()
+    data_processor.standardize_by_conversation()
     
-    # 特徴量選択
-    processor.select_features()
+    # 特徴量選択前のスケーリング（Lasso等の正則化手法のため）
+    print("\n特徴量選択前のスケーリング:")
+    data_processor.scale_features_for_selection(scaler_type='standard')
+    
+    # 特徴量選択（複数の方法を比較して最適なものを選択）
+    print("\n特徴量選択方法の比較と選択:")
+    best_method, selection_results = data_processor.compare_feature_selection_methods(
+        methods=['percentile', 'k_best', 'mutual_info', 'rfe', 'lasso', 'tree_importance', 'boruta', 'stepwise_forward', 'stepwise_backward'],
+        percentile=50,
+        k=20,
+        n_features=15,
+        threshold='mean',
+        C=1.0,
+        k_features='best'
+    )
+    
+    # 最適な方法で特徴量選択を実行
+    if best_method:
+        print(f"\n最適な方法 '{best_method}' で特徴量選択を実行:")
+        if best_method == 'percentile':
+            data_processor.select_features(method='percentile', percentile=50)
+        elif best_method == 'k_best':
+            data_processor.select_features(method='k_best', k=20)
+        elif best_method == 'mutual_info':
+            data_processor.select_features(method='mutual_info', k=20)
+        elif best_method == 'tree_importance':
+            data_processor.select_features(method='tree_importance', threshold='mean')
+        elif best_method == 'rfe':
+            data_processor.select_features(method='rfe', n_features=15)
+        elif best_method == 'lasso':
+            data_processor.select_features(method='lasso', C=1.0)
+        elif best_method == 'boruta':
+            data_processor.select_features(method='boruta', n_estimators=50, max_iter=50)
+        elif best_method == 'stepwise_forward':
+            data_processor.select_features(method='stepwise_forward', k_features='best')
+        elif best_method == 'stepwise_backward':
+            data_processor.select_features(method='stepwise_backward', k_features='best')
+    else:
+        # デフォルトの方法を使用
+        print("\nデフォルトの方法（相互情報量）で特徴量選択を実行:")
+        data_processor.select_features(method='mutual_info', k=20)
     
     # 会話単位でのデータ分割（テストサイズを調整）
-    X_train, X_test, y_train, y_test, train_conv_ids, test_conv_ids = processor.split_by_conversation(test_size=0.3)
+    X_train, X_test, y_train, y_test, train_conv_ids, test_conv_ids = data_processor.split_by_conversation(test_size=0.3)
     
     # XGBoost用ラベル（0始まり）
     y_train_xgb = y_train - 1
@@ -237,7 +281,17 @@ def main():
     print("-" * 30)
     
     # 各モデルの評価
-    ensemble_results = ensemble.evaluate_model(X_test, y_test)
+    # アンサンブルモデル
+    ensemble_probs = ensemble.predict_proba(X_test)
+    ensemble_preds_raw = np.argmax(ensemble_probs, axis=1)
+    ensemble_preds = ensemble_preds_raw + 1
+    
+    ensemble_results = {
+        'predictions': ensemble_preds,
+        'probabilities': ensemble_probs,
+        'accuracy': np.mean(ensemble_preds == y_test),
+        'confusion_matrix': confusion_matrix(y_test, ensemble_preds)
+    }
     
     # XGBoostとディープラーニングモデルの評価（利用可能な場合のみ）
     xgb_results = None
@@ -245,21 +299,35 @@ def main():
     
     if xgb_model:
         try:
-            # 評価時も0始まり
-            xgb_results = xgb_model.evaluate(X_test, y_test_xgb)
-            # 予測値を+1して元のラベルに戻す
-            xgb_results['predictions'] = xgb_results['predictions'] + 1
-            xgb_results['confusion_matrix'] = confusion_matrix(y_test, xgb_results['predictions'])
+            # 確率から予測を正しく取得
+            xgb_probs = xgb_model.predict_proba(X_test)
+            xgb_preds_raw = np.argmax(xgb_probs, axis=1)
+            xgb_preds = xgb_preds_raw + 1  # +1して元のラベルに戻す
+            
+            # 評価結果を構築
+            xgb_results = {
+                'predictions': xgb_preds,
+                'probabilities': xgb_probs,
+                'accuracy': np.mean(xgb_preds == y_test),
+                'confusion_matrix': confusion_matrix(y_test, xgb_preds)
+            }
         except Exception as e:
             print(f"XGBoost評価エラー: {e}")
     
     if dl_model:
         try:
-            # 評価時も0始まりラベルを使用
-            dl_results = dl_model.evaluate(X_test, y_test_dl)
-            # 予測値を+1して元のラベルに戻す
-            dl_results['predictions'] = dl_results['predictions'] + 1
-            dl_results['confusion_matrix'] = confusion_matrix(y_test, dl_results['predictions'])
+            # 確率から予測を正しく取得
+            dl_probs = dl_model.predict_proba(X_test)
+            dl_preds_raw = np.argmax(dl_probs, axis=1)  # 各サンプルで最も高い確率のクラスを選択
+            dl_preds = dl_preds_raw + 1  # +1して元のラベルに戻す
+            
+            # 評価結果を構築
+            dl_results = {
+                'predictions': dl_preds,
+                'probabilities': dl_probs,
+                'accuracy': np.mean(dl_preds == y_test),
+                'confusion_matrix': confusion_matrix(y_test, dl_preds)
+            }
         except Exception as e:
             print(f"ディープラーニング評価エラー: {e}")
     
@@ -350,40 +418,218 @@ def main():
     test_sample = X_test.iloc[:5]
     true_labels = y_test.iloc[:5]
     
-    print("予測テスト結果:")
-    print("-" * 40)
+    # クラス名の定義
+    class_names = ['LL', 'LM', 'MM', 'MH', 'HH']
+    
+    print("予測テスト結果（詳細確率付き）:")
+    print("-" * 60)
     
     for i in range(len(test_sample)):
         print(f"\nサンプル {i+1}:")
         
-        # 各モデルの予測
-        ensemble_pred = ensemble.predict(test_sample.iloc[i:i+1])[0]
+        # 各モデルの予測（確率から正しく取得）
+        # アンサンブルモデル
         ensemble_prob = ensemble.predict_proba(test_sample.iloc[i:i+1])[0]
+        ensemble_pred_raw = np.argmax(ensemble_prob)
+        ensemble_pred = ensemble_pred_raw + 1  # +1して元のラベルに戻す
         
-        xgb_pred = xgb_model.predict(test_sample.iloc[i:i+1])[0] if xgb_model else None
-        xgb_prob = xgb_model.predict_proba(test_sample.iloc[i:i+1])[0] if xgb_model else None
+        # デバッグ情報（確率と予測の一致確認）
+        print(f"  デバッグ - アンサンブル:")
+        print(f"    確率最大値: {max(ensemble_prob):.3f} (インデックス: {ensemble_pred_raw})")
+        print(f"    予測クラス: {ensemble_pred} ({class_names[ensemble_pred_raw]})")
         
-        dl_pred_raw = dl_model.predict(test_sample.iloc[i:i+1])[0] if dl_model else None
-        dl_pred = dl_pred_raw + 1 if dl_pred_raw is not None else None  # +1して元のラベルに戻す
-        dl_prob = dl_model.predict_proba(test_sample.iloc[i:i+1])[0] if dl_model else None
+        # XGBoostモデル
+        if xgb_model:
+            xgb_prob = xgb_model.predict_proba(test_sample.iloc[i:i+1])[0]
+            xgb_pred_raw = np.argmax(xgb_prob)
+            xgb_pred = xgb_pred_raw + 1  # +1して元のラベルに戻す
+            
+            print(f"  デバッグ - XGBoost:")
+            print(f"    確率最大値: {max(xgb_prob):.3f} (インデックス: {xgb_pred_raw})")
+            print(f"    予測クラス: {xgb_pred} ({class_names[xgb_pred_raw]})")
+        else:
+            xgb_prob = None
+            xgb_pred = None
+        
+        # ディープラーニングモデル
+        if dl_model:
+            dl_prob = dl_model.predict_proba(test_sample.iloc[i:i+1])[0]
+            dl_pred_raw = np.argmax(dl_prob)
+            dl_pred = dl_pred_raw + 1  # +1して元のラベルに戻す
+            
+            print(f"  デバッグ - ディープラーニング:")
+            print(f"    確率最大値: {max(dl_prob):.3f} (インデックス: {dl_pred_raw})")
+            print(f"    予測クラス: {dl_pred} ({class_names[dl_pred_raw]})")
+        else:
+            dl_prob = None
+            dl_pred = None
         
         true_label = true_labels.iloc[i]
+        true_class_name = class_names[int(true_label) - 1] if 1 <= true_label <= 5 else f"クラス{true_label}"
         
-        print(f"  真のラベル: {true_label}")
-        print(f"  アンサンブル: {ensemble_pred} (確率: {max(ensemble_prob):.3f})")
+        print(f"  真のラベル: {true_label} ({true_class_name})")
+        
+        # アンサンブルモデルの詳細確率
+        print(f"  アンサンブル予測: {ensemble_pred} ({class_names[int(ensemble_pred) - 1]})")
+        print(f"    確率分布:")
+        for j, (class_name, prob) in enumerate(zip(class_names, ensemble_prob)):
+            marker = "★" if j == int(ensemble_pred) - 1 else "  "
+            print(f"      {marker} {class_name}: {prob:.3f}")
+        
+        # XGBoostモデルの詳細確率
         if xgb_model:
-            print(f"  XGBoost: {xgb_pred} (確率: {max(xgb_prob):.3f})")
+            print(f"  XGBoost予測: {xgb_pred} ({class_names[int(xgb_pred) - 1]})")
+            print(f"    確率分布:")
+            for j, (class_name, prob) in enumerate(zip(class_names, xgb_prob)):
+                marker = "★" if j == int(xgb_pred) - 1 else "  "
+                print(f"      {marker} {class_name}: {prob:.3f}")
+        
+        # ディープラーニングモデルの詳細確率
         if dl_model:
-            print(f"  ディープラーニング: {dl_pred} (確率: {max(dl_prob):.3f})")
+            print(f"  ディープラーニング予測: {dl_pred} ({class_names[int(dl_pred) - 1]})")
+            print(f"    確率分布:")
+            for j, (class_name, prob) in enumerate(zip(class_names, dl_prob)):
+                marker = "★" if j == int(dl_pred) - 1 else "  "
+                print(f"      {marker} {class_name}: {prob:.3f}")
+        
+        # 予測の正誤判定
+        ensemble_correct = "✓" if ensemble_pred == true_label else "✗"
+        xgb_correct = "✓" if xgb_model and xgb_pred == true_label else "✗" if xgb_model else "-"
+        dl_correct = "✓" if dl_model and dl_pred == true_label else "✗" if dl_model else "-"
+        
+        print(f"  正誤判定: アンサンブル{ensemble_correct}, XGBoost{xgb_correct}, ディープラーニング{dl_correct}")
+        
+        # 確率の信頼度評価
+        ensemble_confidence = max(ensemble_prob)
+        xgb_confidence = max(xgb_prob) if xgb_model else None
+        dl_confidence = max(dl_prob) if dl_model else None
+        
+        # 信頼度の文字列を構築
+        confidence_str = f"アンサンブル{ensemble_confidence:.3f}"
+        if xgb_confidence is not None:
+            confidence_str += f", XGBoost{xgb_confidence:.3f}"
+        else:
+            confidence_str += ", XGBoostN/A"
+        if dl_confidence is not None:
+            confidence_str += f", ディープラーニング{dl_confidence:.3f}"
+        else:
+            confidence_str += ", ディープラーニングN/A"
+        
+        print(f"  予測信頼度: {confidence_str}")
+        
+        # 確率の分散（不確実性の指標）
+        ensemble_entropy = -np.sum(ensemble_prob * np.log(ensemble_prob + 1e-10))
+        xgb_entropy = -np.sum(xgb_prob * np.log(xgb_prob + 1e-10)) if xgb_model else None
+        dl_entropy = -np.sum(dl_prob * np.log(dl_prob + 1e-10)) if dl_model else None
+        
+        # 不確実性の文字列を構築
+        entropy_str = f"アンサンブル{ensemble_entropy:.3f}"
+        if xgb_entropy is not None:
+            entropy_str += f", XGBoost{xgb_entropy:.3f}"
+        else:
+            entropy_str += ", XGBoostN/A"
+        if dl_entropy is not None:
+            entropy_str += f", ディープラーニング{dl_entropy:.3f}"
+        else:
+            entropy_str += ", ディープラーニングN/A"
+        
+        print(f"  予測不確実性: {entropy_str}")
+        
+        # ソフト投票（アンサンブル＋ディープラーニング）
+        if dl_model:
+            avg_prob = (ensemble_prob + dl_prob) / 2
+            final_pred = np.argmax(avg_prob) + 1  # +1でラベルを合わせる
+            print(f"  アンサンブル＋ディープラーニング投票予測: {final_pred} (確率: {avg_prob[np.argmax(avg_prob)]:.3f})")
+        
+        print("-" * 40)
+    
+    # 確率分布の可視化
+    print(f"\n確率分布の可視化:")
+    print("-" * 40)
+    
+    # サンプルごとの確率分布をプロット
+    fig, axes = plt.subplots(len(test_sample), 1, figsize=(12, 3 * len(test_sample)))
+    if len(test_sample) == 1:
+        axes = [axes]
+    
+    for i in range(len(test_sample)):
+        ax = axes[i]
+        
+        # 各モデルの確率を取得
+        ensemble_prob = ensemble.predict_proba(test_sample.iloc[i:i+1])[0]
+        xgb_prob = xgb_model.predict_proba(test_sample.iloc[i:i+1])[0] if xgb_model else None
+        dl_prob = dl_model.predict_proba(test_sample.iloc[i:i+1])[0] if dl_model else None
+        
+        # プロットデータの準備
+        x = np.arange(len(class_names))
+        width = 0.2
+        
+        # 各モデルの確率をプロット
+        ax.bar(x - width, ensemble_prob, width, label='アンサンブル', alpha=0.8)
+        if xgb_model:
+            ax.bar(x, xgb_prob, width, label='XGBoost', alpha=0.8)
+        if dl_model:
+            ax.bar(x + width, dl_prob, width, label='ディープラーニング', alpha=0.8)
+        # アンサンブル＋ディープラーニング平均の確率分布を追加
+        if dl_model:
+            avg_prob = (ensemble_prob + dl_prob) / 2
+            ax.bar(x + 2*width, avg_prob, width, label='アンサンブル＋DL平均', alpha=0.8, color='purple')
+        
+        # 真のラベルを強調表示
+        true_label_idx = int(true_labels.iloc[i]) - 1
+        ax.axvline(x=true_label_idx, color='red', linestyle='--', alpha=0.7, label='真のラベル')
+        
+        ax.set_xlabel('活性度クラス')
+        ax.set_ylabel('確率')
+        ax.set_title(f'サンプル {i+1} の確率分布 (真のラベル: {true_labels.iloc[i]} - {class_names[true_label_idx]})')
+        ax.set_xticks(x)
+        ax.set_xticklabels(class_names)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 確率値をテキストで表示
+        for j, prob in enumerate(ensemble_prob):
+            ax.text(j - width, prob + 0.01, f'{prob:.2f}', ha='center', va='bottom', fontsize=8)
+        if xgb_model:
+            for j, prob in enumerate(xgb_prob):
+                ax.text(j, prob + 0.01, f'{prob:.2f}', ha='center', va='bottom', fontsize=8)
+        if dl_model:
+            for j, prob in enumerate(dl_prob):
+                ax.text(j + width, prob + 0.01, f'{prob:.2f}', ha='center', va='bottom', fontsize=8)
+        if dl_model:
+            avg_prob = (ensemble_prob + dl_prob) / 2
+            for j, prob in enumerate(avg_prob):
+                ax.text(j + 2*width, prob + 0.01, f'{prob:.2f}', ha='center', va='bottom', fontsize=8, color='purple')
+    
+    plt.tight_layout()
+    plt.savefig('models/prediction_probabilities.pdf', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print("確率分布の可視化を保存: models/prediction_probabilities.pdf")
     
     # モデル間の予測一致度を確認
     print(f"\nモデル間の予測一致度:")
     print("-" * 40)
     
-    ensemble_preds = ensemble.predict(test_sample)
-    xgb_preds = xgb_model.predict(test_sample) if xgb_model else None
-    dl_preds_raw = dl_model.predict(test_sample) if dl_model else None
-    dl_preds = dl_preds_raw + 1 if dl_preds_raw is not None else None  # +1して元のラベルに戻す
+    # すべてのモデルで確率から予測を正しく取得
+    # アンサンブル
+    ensemble_probs = ensemble.predict_proba(test_sample)
+    ensemble_preds_raw = np.argmax(ensemble_probs, axis=1)
+    ensemble_preds = ensemble_preds_raw + 1
+    
+    # XGBoost
+    xgb_preds = None
+    if xgb_model:
+        xgb_probs = xgb_model.predict_proba(test_sample)
+        xgb_preds_raw = np.argmax(xgb_probs, axis=1)
+        xgb_preds = xgb_preds_raw + 1
+    
+    # ディープラーニング
+    dl_preds = None
+    if dl_model:
+        dl_probs = dl_model.predict_proba(test_sample)
+        dl_preds_raw = np.argmax(dl_probs, axis=1)
+        dl_preds = dl_preds_raw + 1
     
     # アンサンブル vs XGBoost
     if xgb_model:
@@ -420,11 +666,28 @@ def main():
         dl_accuracy = np.mean(dl_preds == true_labels)
         print(f"ディープラーニング正解率: {dl_accuracy:.3f}")
     
+    # Permutation Importanceの計算
+    print(f"\nPermutation Importanceの計算:")
+    print("-" * 40)
+    
+    # アンサンブルモデルのPermutation Importance
+    print("アンサンブルモデルのPermutation Importance:")
+    ensemble_perm_importance = data_processor.calculate_permutation_importance(
+        ensemble.ensemble_model, X_test, y_test, n_repeats=5
+    )
+    
+    # XGBoostモデルのPermutation Importance
+    if xgb_model:
+        print("\nXGBoostモデルのPermutation Importance:")
+        xgb_perm_importance = data_processor.calculate_permutation_importance(
+            xgb_model.model, X_test, y_test_xgb, n_repeats=5
+        )
+    
     # 9. 結果サマリー
     print("\n9. 処理結果のサマリー")
     print("-" * 30)
     
-    print(f"データサンプル数: {len(df)}")
+    print(f"データサンプル数: {len(data_processor.df)}")
     print(f"特徴量数: {len(X_train.columns)}")
     print(f"訓練データ数: {len(X_train)}")
     print(f"テストデータ数: {len(X_test)}")
@@ -444,6 +707,7 @@ def main():
     print(f"\n保存されたグラフ:")
     print(f"  - 特徴量重要度比較: models/feature_importance_comparison.pdf")
     print(f"  - 最適化結果: models/optimization_results.pdf")
+    print(f"  - 予測確率分布: models/prediction_probabilities.pdf")
     if dl_model:
         print(f"  - 訓練履歴: models/training_history.pdf")
     
