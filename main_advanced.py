@@ -118,6 +118,11 @@ def main():
                        help='学習データファイルのパス (指定しない場合はサンプルデータを生成)')
     parser.add_argument('--test', '-t', action='store_true',
                        help='予測テストを実行する')
+    parser.add_argument('--feature-selection', '-fs', type=str, 
+                       choices=['percentile', 'k_best', 'mutual_info', 'rfe', 'lasso', 'tree_importance', 'boruta', 'stepwise_forward', 'stepwise_backward'],
+                       help='特徴量選択方法を指定 (指定しない場合は自動選択)')
+    parser.add_argument('--use-all-data', '-all', action='store_true',
+                       help='全データを使って学習（訓練・テスト分割を行わない）')
     
     args = parser.parse_args()
     
@@ -169,47 +174,114 @@ def main():
     # 会話単位での標準化
     data_processor.standardize_by_conversation()
     
-    # 特徴量選択前のスケーリング（Lasso等の正則化手法のため）
+    # 特徴量選択前のスケーリング
     print("\n特徴量選択前のスケーリング:")
     data_processor.scale_features_for_selection(scaler_type='standard')
     
-    # 特徴量選択（複数の方法を比較して最適なものを選択）
-    print("\n特徴量選択方法の比較と選択:")
-    best_method, selection_results = data_processor.compare_feature_selection_methods(
-        methods=['percentile', 'k_best', 'mutual_info', 'rfe', 'lasso', 'tree_importance', 'boruta', 'stepwise_forward', 'stepwise_backward'],
-        percentile=50,
-        k=20,
-        n_features=15,
-        threshold='mean',
-        C=1.0,
-        k_features='best'
-    )
-    
-    # 最適な方法で特徴量選択を実行
-    if best_method:
-        print(f"\n最適な方法 '{best_method}' で特徴量選択を実行:")
-        if best_method == 'percentile':
+    # 特徴量選択（コマンドライン引数で指定された場合は直接使用、そうでなければ比較して最適なものを選択）
+    if args.feature_selection:
+        print(f"\n指定された特徴量選択方法 '{args.feature_selection}' を使用:")
+        if args.feature_selection == 'percentile':
             data_processor.select_features(method='percentile', percentile=50)
-        elif best_method == 'k_best':
+        elif args.feature_selection == 'k_best':
             data_processor.select_features(method='k_best', k=20)
-        elif best_method == 'mutual_info':
+        elif args.feature_selection == 'mutual_info':
             data_processor.select_features(method='mutual_info', k=20)
-        elif best_method == 'tree_importance':
+        elif args.feature_selection == 'tree_importance':
             data_processor.select_features(method='tree_importance', threshold='mean')
-        elif best_method == 'rfe':
+        elif args.feature_selection == 'rfe':
             data_processor.select_features(method='rfe', n_features=15)
-        elif best_method == 'lasso':
+        elif args.feature_selection == 'lasso':
             data_processor.select_features(method='lasso', C=1.0)
-        elif best_method == 'boruta':
+        elif args.feature_selection == 'boruta':
             data_processor.select_features(method='boruta', n_estimators=50, max_iter=50)
-        elif best_method == 'stepwise_forward':
+        elif args.feature_selection == 'stepwise_forward':
             data_processor.select_features(method='stepwise_forward', k_features='best')
-        elif best_method == 'stepwise_backward':
+        elif args.feature_selection == 'stepwise_backward':
             data_processor.select_features(method='stepwise_backward', k_features='best')
     else:
-        # デフォルトの方法を使用
-        print("\nデフォルトの方法（相互情報量）で特徴量選択を実行:")
-        data_processor.select_features(method='mutual_info', k=20)
+        print("\n特徴量選択方法の比較と選択:")
+        best_method, selection_results = data_processor.compare_feature_selection_methods(
+            methods=['percentile', 'k_best', 'mutual_info', 'rfe', 'lasso', 'tree_importance', 'boruta', 'stepwise_forward', 'stepwise_backward'],
+            percentile=50,
+            k=20,
+            n_features=15,
+            threshold='mean',
+            C=1.0,
+            k_features='best'
+        )
+        if best_method:
+            print(f"\n最適な方法 '{best_method}' で特徴量選択を実行:")
+            if best_method == 'percentile':
+                data_processor.select_features(method='percentile', percentile=50)
+            elif best_method == 'k_best':
+                data_processor.select_features(method='k_best', k=20)
+            elif best_method == 'mutual_info':
+                data_processor.select_features(method='mutual_info', k=20)
+            elif best_method == 'tree_importance':
+                data_processor.select_features(method='tree_importance', threshold='mean')
+            elif best_method == 'rfe':
+                data_processor.select_features(method='rfe', n_features=15)
+            elif best_method == 'lasso':
+                data_processor.select_features(method='lasso', C=1.0)
+            elif best_method == 'boruta':
+                data_processor.select_features(method='boruta', n_estimators=50, max_iter=50)
+            elif best_method == 'stepwise_forward':
+                data_processor.select_features(method='stepwise_forward', k_features='best')
+            elif best_method == 'stepwise_backward':
+                data_processor.select_features(method='stepwise_backward', k_features='best')
+        else:
+            print("\nデフォルトの方法（相互情報量）で特徴量選択を実行:")
+            data_processor.select_features(method='mutual_info', k=20)
+    
+    # 全データ学習モード
+    if args.use_all_data:
+        print("\n全データを使って学習モード")
+        X_all = data_processor.df[data_processor.feature_columns]
+        y_all = data_processor.df['class']
+        y_all_xgb = y_all - 1
+
+        # ハイパーパラメータ最適化
+        print("\n全データでハイパーパラメータ最適化")
+        optimizer = HyperparameterOptimizer()
+        best_rf = optimizer.optimize_random_forest(X_all, y_all, cv=5, method='random')
+        best_svm = optimizer.optimize_svm(X_all, y_all, cv=5)
+        best_xgb = optimizer.optimize_xgboost(X_all, y_all_xgb, cv=5, method='grid')
+
+        # 最適化済みパラメータでモデル学習
+        ensemble = EnsembleModel()
+        ensemble.train_with_optimized_params(
+            X_all, y_all,
+            rf_params=optimizer.best_params.get('random_forest', {}),
+            svm_params=optimizer.best_params.get('svm', {})
+        )
+        if XGBOOST_AVAILABLE:
+            try:
+                xgb_model = XGBoostModel(**optimizer.best_params.get('xgboost', {}))
+                xgb_model.train(X_all, y_all_xgb)
+                xgb_model.save_model('models/xgboost_model_all_data.pickle')
+            except Exception as e:
+                print(f"XGBoostモデルの訓練に失敗: {e}")
+        if TENSORFLOW_AVAILABLE:
+            try:
+                dl_model = DeepLearningModel(
+                    input_dim=X_all.shape[1],
+                    num_classes=5,
+                    hidden_layers=[128, 64, 32],
+                    dropout_rate=0.3,
+                    learning_rate=0.001,
+                    epochs=50,
+                    patience=10
+                )
+                dl_model.train(X_all, y_all - 1, X_all, y_all - 1)
+                dl_model.save_model('models/deep_learning_model_all_data.h5')
+            except Exception as e:
+                print(f"ディープラーニングモデルの訓練に失敗: {e}")
+        # モデル保存
+        ensemble.save_model('models/optimized_ensemble_model_all_data.pickle')
+        optimizer.save_optimization_results('models/optimization_results_all_data.pickle')
+        print("全データでハイパーパラメータ最適化＆学習したモデルを保存しました。評価や予測テストはスキップされます。")
+        return
     
     # 会話単位でのデータ分割（テストサイズを調整）
     X_train, X_test, y_train, y_test, train_conv_ids, test_conv_ids = data_processor.split_by_conversation(test_size=0.3)
@@ -607,81 +679,263 @@ def main():
     
     print("確率分布の可視化を保存: models/prediction_probabilities.pdf")
     
-    # モデル間の予測一致度を確認
-    print(f"\nモデル間の予測一致度:")
+    # 全テストデータでの予測結果をCSVに保存
+    print(f"\n全テストデータでの予測結果をCSVに保存:")
     print("-" * 40)
     
-    # すべてのモデルで確率から予測を正しく取得
-    # アンサンブル
-    ensemble_probs = ensemble.predict_proba(test_sample)
-    ensemble_preds_raw = np.argmax(ensemble_probs, axis=1)
-    ensemble_preds = ensemble_preds_raw + 1
+    # 全テストデータでの予測と確率を取得
+    all_ensemble_probs = ensemble.predict_proba(X_test)
+    all_ensemble_preds_raw = np.argmax(all_ensemble_probs, axis=1)
+    all_ensemble_preds = all_ensemble_preds_raw + 1
     
-    # XGBoost
-    xgb_preds = None
+    all_xgb_probs = None
+    all_xgb_preds = None
     if xgb_model:
-        xgb_probs = xgb_model.predict_proba(test_sample)
-        xgb_preds_raw = np.argmax(xgb_probs, axis=1)
-        xgb_preds = xgb_preds_raw + 1
+        all_xgb_probs = xgb_model.predict_proba(X_test)
+        all_xgb_preds_raw = np.argmax(all_xgb_probs, axis=1)
+        all_xgb_preds = all_xgb_preds_raw + 1
     
-    # ディープラーニング
-    dl_preds = None
+    all_dl_probs = None
+    all_dl_preds = None
     if dl_model:
-        dl_probs = dl_model.predict_proba(test_sample)
-        dl_preds_raw = np.argmax(dl_probs, axis=1)
-        dl_preds = dl_preds_raw + 1
+        all_dl_probs = dl_model.predict_proba(X_test)
+        all_dl_preds_raw = np.argmax(all_dl_probs, axis=1)
+        all_dl_preds = all_dl_preds_raw + 1
     
-    # アンサンブル vs XGBoost
-    if xgb_model:
-        ensemble_xgb_agreement = np.mean(ensemble_preds == xgb_preds)
-        print(f"アンサンブル vs XGBoost 一致度: {ensemble_xgb_agreement:.3f}")
-    
-    # アンサンブル vs ディープラーニング
+    # アンサンブル＋ディープラーニング平均の確率と予測
+    all_avg_probs = None
+    all_avg_preds = None
     if dl_model:
-        ensemble_dl_agreement = np.mean(ensemble_preds == dl_preds)
-        print(f"アンサンブル vs ディープラーニング 一致度: {ensemble_dl_agreement:.3f}")
+        all_avg_probs = (all_ensemble_probs + all_dl_probs) / 2
+        all_avg_preds_raw = np.argmax(all_avg_probs, axis=1)
+        all_avg_preds = all_avg_preds_raw + 1
     
-    # XGBoost vs ディープラーニング
-    if xgb_model and dl_model:
-        xgb_dl_agreement = np.mean(xgb_preds == dl_preds)
-        print(f"XGBoost vs ディープラーニング 一致度: {xgb_dl_agreement:.3f}")
+    # 結果をDataFrameにまとめる
+    results_data = []
+    class_names = ['LL', 'LM', 'MM', 'MH', 'HH']
     
-    # 全モデル一致
-    if xgb_model and dl_model:
-        all_agreement = np.mean((ensemble_preds == xgb_preds) & (xgb_preds == dl_preds))
-        print(f"全モデル一致度: {all_agreement:.3f}")
+    for i in range(len(X_test)):
+        row = {
+            'sample_id': i,
+            'true_label': int(y_test.iloc[i]),
+            'true_class': class_names[int(y_test.iloc[i]) - 1],
+            
+            # アンサンブルモデル
+            'ensemble_prediction': int(all_ensemble_preds[i]),
+            'ensemble_pred_class': class_names[int(all_ensemble_preds[i]) - 1],
+            'ensemble_confidence': float(max(all_ensemble_probs[i])),
+            'ensemble_entropy': float(-np.sum(all_ensemble_probs[i] * np.log(all_ensemble_probs[i] + 1e-10))),
+            'ensemble_correct': all_ensemble_preds[i] == y_test.iloc[i]
+        }
+        
+        # アンサンブルモデルの確率分布
+        for j, class_name in enumerate(class_names):
+            row[f'ensemble_prob_{class_name}'] = float(all_ensemble_probs[i][j])
+        
+        # XGBoostモデル
+        if xgb_model:
+            row.update({
+                'xgb_prediction': int(all_xgb_preds[i]),
+                'xgb_pred_class': class_names[int(all_xgb_preds[i]) - 1],
+                'xgb_confidence': float(max(all_xgb_probs[i])),
+                'xgb_entropy': float(-np.sum(all_xgb_probs[i] * np.log(all_xgb_probs[i] + 1e-10))),
+                'xgb_correct': all_xgb_preds[i] == y_test.iloc[i]
+            })
+            for j, class_name in enumerate(class_names):
+                row[f'xgb_prob_{class_name}'] = float(all_xgb_probs[i][j])
+        else:
+            row.update({
+                'xgb_prediction': None,
+                'xgb_pred_class': None,
+                'xgb_confidence': None,
+                'xgb_entropy': None,
+                'xgb_correct': None
+            })
+            for class_name in class_names:
+                row[f'xgb_prob_{class_name}'] = None
+        
+        # ディープラーニングモデル
+        if dl_model:
+            row.update({
+                'dl_prediction': int(all_dl_preds[i]),
+                'dl_pred_class': class_names[int(all_dl_preds[i]) - 1],
+                'dl_confidence': float(max(all_dl_probs[i])),
+                'dl_entropy': float(-np.sum(all_dl_probs[i] * np.log(all_dl_probs[i] + 1e-10))),
+                'dl_correct': all_dl_preds[i] == y_test.iloc[i]
+            })
+            for j, class_name in enumerate(class_names):
+                row[f'dl_prob_{class_name}'] = float(all_dl_probs[i][j])
+        else:
+            row.update({
+                'dl_prediction': None,
+                'dl_pred_class': None,
+                'dl_confidence': None,
+                'dl_entropy': None,
+                'dl_correct': None
+            })
+            for class_name in class_names:
+                row[f'dl_prob_{class_name}'] = None
+        
+        # アンサンブル＋ディープラーニング平均
+        if dl_model:
+            row.update({
+                'ensemble_dl_avg_prediction': int(all_avg_preds[i]),
+                'ensemble_dl_avg_pred_class': class_names[int(all_avg_preds[i]) - 1],
+                'ensemble_dl_avg_confidence': float(max(all_avg_probs[i])),
+                'ensemble_dl_avg_entropy': float(-np.sum(all_avg_probs[i] * np.log(all_avg_probs[i] + 1e-10))),
+                'ensemble_dl_avg_correct': all_avg_preds[i] == y_test.iloc[i]
+            })
+            for j, class_name in enumerate(class_names):
+                row[f'ensemble_dl_avg_prob_{class_name}'] = float(all_avg_probs[i][j])
+        else:
+            row.update({
+                'ensemble_dl_avg_prediction': None,
+                'ensemble_dl_avg_pred_class': None,
+                'ensemble_dl_avg_confidence': None,
+                'ensemble_dl_avg_entropy': None,
+                'ensemble_dl_avg_correct': None
+            })
+            for class_name in class_names:
+                row[f'ensemble_dl_avg_prob_{class_name}'] = None
+        
+        results_data.append(row)
+    
+    # DataFrameに変換してCSVに保存
+    results_df = pd.DataFrame(results_data)
+    csv_path = 'models/prediction_results_full.csv'
+    results_df.to_csv(csv_path, index=False, encoding='utf-8')
+    
+    print(f"全テストデータの予測結果を保存: {csv_path}")
+    print(f"保存されたサンプル数: {len(results_df)}")
+    
+    # 統計情報の表示
+    print(f"\n全テストデータでの統計情報:")
+    print("-" * 40)
     
     # 各モデルの正解率
-    print(f"\n各モデルの正解率（テストサンプル5個）:")
-    print("-" * 40)
-    
-    ensemble_accuracy = np.mean(ensemble_preds == true_labels)
-    print(f"アンサンブル正解率: {ensemble_accuracy:.3f}")
+    ensemble_accuracy = results_df['ensemble_correct'].mean()
+    print(f"アンサンブル正解率: {ensemble_accuracy:.3f} ({ensemble_accuracy*100:.1f}%)")
     
     if xgb_model:
-        xgb_accuracy = np.mean(xgb_preds == true_labels)
-        print(f"XGBoost正解率: {xgb_accuracy:.3f}")
+        xgb_accuracy = results_df['xgb_correct'].mean()
+        print(f"XGBoost正解率: {xgb_accuracy:.3f} ({xgb_accuracy*100:.1f}%)")
     
     if dl_model:
-        dl_accuracy = np.mean(dl_preds == true_labels)
-        print(f"ディープラーニング正解率: {dl_accuracy:.3f}")
+        dl_accuracy = results_df['dl_correct'].mean()
+        print(f"ディープラーニング正解率: {dl_accuracy:.3f} ({dl_accuracy*100:.1f}%)")
+        
+        avg_accuracy = results_df['ensemble_dl_avg_correct'].mean()
+        print(f"アンサンブル＋DL平均正解率: {avg_accuracy:.3f} ({avg_accuracy*100:.1f}%)")
     
-    # Permutation Importanceの計算
-    print(f"\nPermutation Importanceの計算:")
-    print("-" * 40)
-    
-    # アンサンブルモデルのPermutation Importance
-    print("アンサンブルモデルのPermutation Importance:")
-    ensemble_perm_importance = data_processor.calculate_permutation_importance(
-        ensemble.ensemble_model, X_test, y_test, n_repeats=5
-    )
-    
-    # XGBoostモデルのPermutation Importance
+    # 平均信頼度
+    print(f"\n平均信頼度:")
+    print(f"アンサンブル: {results_df['ensemble_confidence'].mean():.3f}")
     if xgb_model:
-        print("\nXGBoostモデルのPermutation Importance:")
-        xgb_perm_importance = data_processor.calculate_permutation_importance(
-            xgb_model.model, X_test, y_test_xgb, n_repeats=5
-        )
+        print(f"XGBoost: {results_df['xgb_confidence'].mean():.3f}")
+    if dl_model:
+        print(f"ディープラーニング: {results_df['dl_confidence'].mean():.3f}")
+        print(f"アンサンブル＋DL平均: {results_df['ensemble_dl_avg_confidence'].mean():.3f}")
+    
+    # 平均不確実性（エントロピー）
+    print(f"\n平均不確実性（エントロピー）:")
+    print(f"アンサンブル: {results_df['ensemble_entropy'].mean():.3f}")
+    if xgb_model:
+        print(f"XGBoost: {results_df['xgb_entropy'].mean():.3f}")
+    if dl_model:
+        print(f"ディープラーニング: {results_df['dl_entropy'].mean():.3f}")
+        print(f"アンサンブル＋DL平均: {results_df['ensemble_dl_avg_entropy'].mean():.3f}")
+    
+    # 予測クラス分布
+    print(f"\n予測クラス分布:")
+    print("アンサンブル:")
+    pred_dist = results_df['ensemble_pred_class'].value_counts().sort_index()
+    for class_name in class_names:
+        count = pred_dist.get(class_name, 0)
+        ratio = count / len(results_df)
+        print(f"  {class_name}: {count}個 ({ratio*100:.1f}%)")
+    
+    if xgb_model:
+        print("XGBoost:")
+        pred_dist = results_df['xgb_pred_class'].value_counts().sort_index()
+        for class_name in class_names:
+            count = pred_dist.get(class_name, 0)
+            ratio = count / len(results_df)
+            print(f"  {class_name}: {count}個 ({ratio*100:.1f}%)")
+    
+    if dl_model:
+        print("ディープラーニング:")
+        pred_dist = results_df['dl_pred_class'].value_counts().sort_index()
+        for class_name in class_names:
+            count = pred_dist.get(class_name, 0)
+            ratio = count / len(results_df)
+            print(f"  {class_name}: {count}個 ({ratio*100:.1f}%)")
+        
+        print("アンサンブル＋DL平均:")
+        pred_dist = results_df['ensemble_dl_avg_pred_class'].value_counts().sort_index()
+        for class_name in class_names:
+            count = pred_dist.get(class_name, 0)
+            ratio = count / len(results_df)
+            print(f"  {class_name}: {count}個 ({ratio*100:.1f}%)")
+    
+    # 真のクラス分布
+    print(f"\n真のクラス分布:")
+    true_dist = results_df['true_class'].value_counts().sort_index()
+    for class_name in class_names:
+        count = true_dist.get(class_name, 0)
+        ratio = count / len(results_df)
+        print(f"  {class_name}: {count}個 ({ratio*100:.1f}%)")
+    
+    # モデル間の予測一致度
+    print(f"\nモデル間の予測一致度:")
+    if xgb_model:
+        ensemble_xgb_agreement = (results_df['ensemble_prediction'] == results_df['xgb_prediction']).mean()
+        print(f"アンサンブル vs XGBoost: {ensemble_xgb_agreement:.3f} ({ensemble_xgb_agreement*100:.1f}%)")
+    
+    if dl_model:
+        ensemble_dl_agreement = (results_df['ensemble_prediction'] == results_df['dl_prediction']).mean()
+        print(f"アンサンブル vs ディープラーニング: {ensemble_dl_agreement:.3f} ({ensemble_dl_agreement*100:.1f}%)")
+        
+        xgb_dl_agreement = (results_df['xgb_prediction'] == results_df['dl_prediction']).mean() if xgb_model else None
+        if xgb_dl_agreement is not None:
+            print(f"XGBoost vs ディープラーニング: {xgb_dl_agreement:.3f} ({xgb_dl_agreement*100:.1f}%)")
+    
+    # 高信頼度予測の分析
+    print(f"\n高信頼度予測（信頼度 > 0.8）の分析:")
+    high_conf_ensemble = results_df[results_df['ensemble_confidence'] > 0.8]
+    if len(high_conf_ensemble) > 0:
+        high_conf_accuracy = high_conf_ensemble['ensemble_correct'].mean()
+        print(f"アンサンブル: {len(high_conf_ensemble)}個 ({len(high_conf_ensemble)/len(results_df)*100:.1f}%), 正解率: {high_conf_accuracy:.3f}")
+    
+    if xgb_model:
+        high_conf_xgb = results_df[results_df['xgb_confidence'] > 0.8]
+        if len(high_conf_xgb) > 0:
+            high_conf_accuracy = high_conf_xgb['xgb_correct'].mean()
+            print(f"XGBoost: {len(high_conf_xgb)}個 ({len(high_conf_xgb)/len(results_df)*100:.1f}%), 正解率: {high_conf_accuracy:.3f}")
+    
+    if dl_model:
+        high_conf_dl = results_df[results_df['dl_confidence'] > 0.8]
+        if len(high_conf_dl) > 0:
+            high_conf_accuracy = high_conf_dl['dl_correct'].mean()
+            print(f"ディープラーニング: {len(high_conf_dl)}個 ({len(high_conf_dl)/len(results_df)*100:.1f}%), 正解率: {high_conf_accuracy:.3f}")
+        
+        high_conf_avg = results_df[results_df['ensemble_dl_avg_confidence'] > 0.8]
+        if len(high_conf_avg) > 0:
+            high_conf_accuracy = high_conf_avg['ensemble_dl_avg_correct'].mean()
+            print(f"アンサンブル＋DL平均: {len(high_conf_avg)}個 ({len(high_conf_avg)/len(results_df)*100:.1f}%), 正解率: {high_conf_accuracy:.3f}")
+    
+    # モデル間の予測一致度を確認
+    print(f"\nモデル間の予測一致度:")
+    if xgb_model:
+        ensemble_xgb_agreement = (results_df['ensemble_prediction'] == results_df['xgb_prediction']).mean()
+        print(f"アンサンブル vs XGBoost: {ensemble_xgb_agreement:.3f}")
+    
+    if dl_model:
+        ensemble_dl_agreement = (results_df['ensemble_prediction'] == results_df['dl_prediction']).mean()
+        print(f"アンサンブル vs ディープラーニング: {ensemble_dl_agreement:.3f}")
+        
+        xgb_dl_agreement = (results_df['xgb_prediction'] == results_df['dl_prediction']).mean() if xgb_model else None
+        if xgb_dl_agreement is not None:
+            print(f"XGBoost vs ディープラーニング: {xgb_dl_agreement:.3f}")
     
     # 9. 結果サマリー
     print("\n9. 処理結果のサマリー")
@@ -723,6 +977,7 @@ if __name__ == '__main__':
         print("  python main_advanced.py                    # サンプルデータで学習")
         print("  python main_advanced.py --data ./data/your_data.csv  # 指定ファイルで学習")
         print("  python main_advanced.py --test             # 予測テスト実行")
+        print("  python main_advanced.py --feature-selection mutual_info  # 指定した特徴量選択方法で学習")
         print("  python main_advanced.py -h                 # ヘルプ表示")
         print()
     
