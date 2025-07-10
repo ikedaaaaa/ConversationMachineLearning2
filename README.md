@@ -1,5 +1,6 @@
 # ConversationMachineLearning2
 会話の活性度を会話特徴量を使って機械学習させる
+ちょっとミスったから削除予定
 
 このリンクを元に作成する予定
 https://github.com/ikedaaaaa/ConversationMachineLearning
